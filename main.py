@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 MCP_API_KEY = os.environ.get("MCP_API_KEY")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 IG_USER_ID = os.environ.get("IG_USER_ID")
-GRAPH_URL = "https://graph.facebook.com/v19.0"
+GRAPH_URL = "https://graph.facebook.com/v24.0"
 
 # ============================================================================
 # SECURITY & HELPERS
