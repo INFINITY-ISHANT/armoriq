@@ -1,1 +1,1 @@
-    # send_mcp_request("tools/list")
+    send_mcp_request("tools/list")

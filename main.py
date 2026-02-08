@@ -250,6 +250,12 @@ async def handle_mcp_request(request: Request):
                             }
                         },
                         {
+                            "name": "get_account_profile",
+                            "description": "Fetch username, followers count, and media count of the Instagram account.",
+                            "inputSchema": {"type": "object", "properties": {}}
+                        },
+
+                        {
                             "name": "get_follower_count",
                             "description": "Fetches the total follower count for the Instagram account.",
                             "inputSchema": {"type": "object", "properties": {}}
@@ -350,6 +356,28 @@ async def handle_mcp_request(request: Request):
 
 
 
+            elif tool_name == "get_account_profile":
+                try:
+                    res = requests.get(
+                        f"{GRAPH_URL}/{IG_USER_ID}",
+                        params={
+                            "fields": "username,followers_count,media_count",
+                            "access_token": ACCESS_TOKEN
+                        },
+                        timeout=15
+                    )
+                    res.raise_for_status()
+                    data = res.json()
+
+                    tool_result = {
+                        "status": "success",
+                        "username": data.get("username"),
+                        "followers_count": data.get("followers_count"),
+                        "media_count": data.get("media_count")
+                    }
+
+                except Exception as e:
+                    tool_result = {"status": "API_ERROR", "details": str(e)}
 
 
             elif tool_name == "reply_to_dm":
