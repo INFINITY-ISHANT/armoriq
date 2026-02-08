@@ -18,7 +18,7 @@ MCP_API_KEY = os.environ.get("MCP_API_KEY")
 # 📸 META GRAPH API CREDENTIALS
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 IG_USER_ID = os.environ.get("IG_USER_ID")
-GRAPH_URL = "https://graph.facebook.com/v21.0"
+GRAPH_URL = "https://graph.facebook.com/v24.0"
 
 # 🔍 GOOGLE SEARCH API CREDENTIALS
 SEARCH_API_KEY = os.environ.get("SEARCH_API_KEY")
