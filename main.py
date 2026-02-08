@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from fastapi import FastAPI, Request, HTTPException, Security, Depends
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.responses import StreamingResponse
+import io
 
 # ============================================================================
 # CONFIGURATION (Loaded from Environment Variables)
@@ -70,15 +71,34 @@ def _fetch_image_urls(query, num_images=1):
         return []
     return [item['link'] for item in search_results['items']]
 
-def _download_image(url, folder, filename):
-    """Downloads an image from a URL."""
+def _download_and_verify_image(url, folder, filename):
+    """Downloads an image, mimicking a browser, and checks if it's valid."""
     if not os.path.exists(folder):
         os.makedirs(folder)
     file_path = os.path.join(folder, filename)
-    img_data = requests.get(url, timeout=10).content
-    with open(file_path, 'wb') as handler:
-        handler.write(img_data)
-    return file_path
+    
+    # CRITICAL FIX: Add User-Agent to prevent 403 Forbidden errors
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Verify it's actually an image before saving
+        image_bytes = io.BytesIO(response.content)
+        img = Image.open(image_bytes)
+        img.verify() # Check for corruption
+        
+        # If valid, save it
+        with open(file_path, 'wb') as handler:
+            handler.write(response.content)
+            
+        return file_path
+    except Exception as e:
+        print(f"⚠️ Failed to download/verify image from {url}: {e}")
+        return None
 
 def _apply_text_overlay(image_path, text, output_path, author=None):
     """Overlays text on an image professionally."""
@@ -91,18 +111,30 @@ def _apply_text_overlay(image_path, text, output_path, author=None):
     draw = ImageDraw.Draw(img)
     width, height = img.size
     
-    # 2. Find font - fallback safely if linux fonts missing
-    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    if not os.path.exists(font_path):
-        font_path = None # Fallback to default
+    # 2. Find font - fallback safely
+    # Try common font paths for Linux (Render) and Windows
+    possible_fonts = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "arial.ttf",
+        "seguiemj.ttf"
+    ]
+    
+    font = None
+    bold_font = None
     
     # Base font size (scaled to image height)
     font_size = int(height / 15)
-    try:
-        font = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
-        bold_path = font_path.replace(".ttf", "-Bold.ttf") if font_path else None
-        bold_font = ImageFont.truetype(bold_path, int(font_size * 1.2)) if bold_path and os.path.exists(bold_path) else font
-    except:
+
+    for path in possible_fonts:
+        try:
+            font = ImageFont.truetype(path, font_size)
+            # Try to find a bold version or just use the same one
+            bold_font = font 
+            break
+        except:
+            continue
+            
+    if not font:
         font = ImageFont.load_default()
         bold_font = font
 
@@ -151,6 +183,11 @@ def _apply_text_overlay(image_path, text, output_path, author=None):
 # MCP ENDPOINT
 # ============================================================================
 
+@app.get("/")
+async def health_check():
+    """Simple health check to verify server is running on Render."""
+    return {"status": "active", "service": "ArmorIQ Social Media MCP", "version": "1.1.0"}
+
 @app.post("/mcp", dependencies=[Depends(verify_api_key)])
 async def handle_mcp_request(request: Request):
     try:
@@ -160,92 +197,81 @@ async def handle_mcp_request(request: Request):
         
         response_data = None
 
-        # --------------------------------------------------------------------
-        # 1. INITIALIZE
-        # --------------------------------------------------------------------
         if method == "initialize":
             response_data = {
-                "jsonrpc": "2.0",
-                "id": msg_id,
+                "jsonrpc": "2.0", "id": msg_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "serverInfo": {
-                        "name": "armor-iq-social-executor",
-                        "version": "1.0.0"
-                    }
+                    "serverInfo": {"name": "armor-iq-social-executor", "version": "1.1.0"}
                 }
             }
 
-        # --------------------------------------------------------------------
-        # 2. TOOLS/LIST
-        # --------------------------------------------------------------------
         elif method == "tools/list":
             response_data = {
-                "jsonrpc": "2.0",
-                "id": msg_id,
+                "jsonrpc": "2.0", "id": msg_id,
                 "result": {
                     "tools": [
+                        {
+                            "name": "get_recent_dms",
+                            "description": "Fetches recent DMs.",
+                            "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 5}}}
+                        },
+                        {
+                            "name": "reply_to_dm",
+                            "description": "Replies to a DM.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {"recipient_id": {"type": "string"}, "message": {"type": "string"}},
+                                "required": ["recipient_id", "message"]
+                            }
+                        },
                         {
                             "name": "publish_photo_post",
                             "description": "Publishes a photo to Instagram.",
                             "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "image_url": {"type": "string"},
-                                    "caption": {"type": "string"}
-                                },
+                                "type": "object", 
+                                "properties": {"image_url": {"type": "string"}, "caption": {"type": "string"}},
                                 "required": ["image_url", "caption"]
                             }
                         },
                         {
                             "name": "get_recent_comments",
-                            "description": "Fetches comments from the latest post.",
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "limit": {"type": "integer", "default": 5}
-                                }
-                            }
+                            "description": "Fetches comments.",
+                            "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 5}}}
                         },
                         {
                             "name": "reply_to_comment",
-                            "description": "Replies to a specific comment.",
+                            "description": "Replies to comment.",
                             "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "comment_id": {"type": "string"},
-                                    "message": {"type": "string"}
-                                },
+                                "type": "object", 
+                                "properties": {"comment_id": {"type": "string"}, "message": {"type": "string"}},
                                 "required": ["comment_id", "message"]
                             }
                         },
                         {
                             "name": "get_account_insights",
-                            "description": "Fetches account metrics.",
+                            "description": "Fetches metrics.",
                             "inputSchema": {"type": "object", "properties": {}}
                         },
                         {
                             "name": "fetch_google_images",
-                            "description": "Fetches image URLs from Google Custom Search API and downloads them.",
+                            "description": "Fetches images.",
                             "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "query": {"type": "string"},
-                                    "num_images": {"type": "integer", "default": 5}
-                                },
+                                "type": "object", 
+                                "properties": {"query": {"type": "string"}, "num_images": {"type": "integer", "default": 5}},
                                 "required": ["query"]
                             }
                         },
                         {
                             "name": "create_quote_image",
-                            "description": "Fetches a background image and overlays a quote on it professionally.",
+                            "description": "Creates quote image.",
                             "inputSchema": {
-                                "type": "object",
+                                "type": "object", 
                                 "properties": {
-                                    "search_query": {"type": "string", "description": "Keywords to find a suitable background image."},
-                                    "quote": {"type": "string", "description": "The quote text to overlay."},
-                                    "author": {"type": "string", "description": "Optional author of the quote."}
+                                    "search_query": {"type": "string"}, 
+                                    "quote": {"type": "string"}, 
+                                    "author": {"type": "string"}
                                 },
                                 "required": ["search_query", "quote"]
                             }
@@ -254,81 +280,88 @@ async def handle_mcp_request(request: Request):
                 }
             }
 
-        # --------------------------------------------------------------------
-        # 3. TOOLS/CALL
-        # --------------------------------------------------------------------
         elif method == "tools/call":
             tool_name = req_data["params"]["name"]
             args = req_data["params"].get("arguments", {})
             tool_result = {"status": "error", "message": "Unknown tool"}
 
-            # --- PUBLISH PHOTO ---
-            if tool_name == "publish_photo_post":
+            if tool_name == "get_recent_dms":
                 try:
-                    res = requests.post(f"{GRAPH_URL}/{IG_USER_ID}/media", params={
-                        "image_url": args["image_url"],
-                        "caption": args["caption"],
-                        "access_token": ACCESS_TOKEN
-                    })
+                    conv_url = f"{GRAPH_URL}/{IG_USER_ID}/conversations"
+                    params = {"platform": "instagram", "access_token": ACCESS_TOKEN, "limit": args.get("limit", 5)}
+                    conv_res = requests.get(conv_url, params=params)
+                    conv_res.raise_for_status()
+                    conversations = conv_res.json().get("data", [])
+                    messages_data = []
+                    for conv in conversations:
+                        conv_id = conv.get("id")
+                        msg_url = f"{GRAPH_URL}/{conv_id}/messages"
+                        msg_params = {"fields": "id,message,from,created_time", "limit": 1, "access_token": ACCESS_TOKEN}
+                        msg_res = requests.get(msg_url, params=msg_params).json()
+                        if "data" in msg_res and len(msg_res["data"]) > 0:
+                            last_msg = msg_res["data"][0]
+                            messages_data.append({
+                                "conversation_id": conv_id,
+                                "sender_id": last_msg.get("from", {}).get("id", "unknown"),
+                                "sender_name": last_msg.get("from", {}).get("username", "Unknown User"),
+                                "text": last_msg.get("message", "[Media]"),
+                                "timestamp": last_msg.get("created_time")
+                            })
+                    tool_result = {"status": "success", "messages": messages_data}
+                except Exception as e:
+                    tool_result = {"status": "API_ERROR", "details": str(e)}
+
+            elif tool_name == "reply_to_dm":
+                try:
+                    send_url = f"{GRAPH_URL}/me/messages"
+                    payload = {"recipient": {"id": args.get("recipient_id")}, "message": {"text": args.get("message")}, "access_token": ACCESS_TOKEN}
+                    send_res = requests.post(send_url, json=payload)
+                    send_res.raise_for_status()
+                    tool_result = {"status": "success", "data": send_res.json()}
+                except Exception as e:
+                    tool_result = {"status": "API_ERROR", "details": str(e)}
+
+            elif tool_name == "publish_photo_post":
+                try:
+                    res = requests.post(f"{GRAPH_URL}/{IG_USER_ID}/media", params={"image_url": args["image_url"], "caption": args["caption"], "access_token": ACCESS_TOKEN})
                     res.raise_for_status()
                     creation_id = res.json().get("id")
-
-                    pub_res = requests.post(f"{GRAPH_URL}/{IG_USER_ID}/media_publish", params={
-                        "creation_id": creation_id,
-                        "access_token": ACCESS_TOKEN
-                    })
+                    pub_res = requests.post(f"{GRAPH_URL}/{IG_USER_ID}/media_publish", params={"creation_id": creation_id, "access_token": ACCESS_TOKEN})
                     tool_result = pub_res.json()
                 except Exception as e:
                     tool_result = {"status": "API_ERROR", "details": str(e)}
 
-            # --- GET COMMENTS ---
             elif tool_name == "get_recent_comments":
                 try:
-                    media_res = requests.get(f"{GRAPH_URL}/{IG_USER_ID}/media", params={
-                        "fields": "id", "limit": 1, "access_token": ACCESS_TOKEN
-                    }).json()
-                    
+                    media_res = requests.get(f"{GRAPH_URL}/{IG_USER_ID}/media", params={"fields": "id", "limit": 1, "access_token": ACCESS_TOKEN}).json()
                     if "data" in media_res and len(media_res["data"]) > 0:
                         latest_id = media_res["data"][0]["id"]
-                        comments = requests.get(f"{GRAPH_URL}/{latest_id}/comments", params={
-                            "fields": "id,text,username,timestamp",
-                            "limit": args.get("limit", 5),
-                            "access_token": ACCESS_TOKEN
-                        }).json()
+                        comments = requests.get(f"{GRAPH_URL}/{latest_id}/comments", params={"fields": "id,text,username,timestamp", "limit": args.get("limit", 5), "access_token": ACCESS_TOKEN}).json()
                         tool_result = comments.get("data", [])
                     else:
                         tool_result = {"status": "no_posts_found"}
                 except Exception as e:
                     tool_result = {"status": "API_ERROR", "details": str(e)}
 
-            # --- REPLY ---
             elif tool_name == "reply_to_comment":
                 try:
-                    reply_res = requests.post(f"{GRAPH_URL}/{args['comment_id']}/replies", params={
-                        "message": args["message"],
-                        "access_token": ACCESS_TOKEN
-                    })
+                    reply_res = requests.post(f"{GRAPH_URL}/{args['comment_id']}/replies", params={"message": args["message"], "access_token": ACCESS_TOKEN})
                     tool_result = reply_res.json()
                 except Exception as e:
                     tool_result = {"status": "API_ERROR", "details": str(e)}
 
-            # --- INSIGHTS ---
             elif tool_name == "get_account_insights":
                 try:
-                    insights = requests.get(f"{GRAPH_URL}/{IG_USER_ID}", params={
-                        "fields": "followers_count,media_count",
-                        "access_token": ACCESS_TOKEN
-                    }).json()
+                    insights = requests.get(f"{GRAPH_URL}/{IG_USER_ID}", params={"fields": "followers_count,media_count", "access_token": ACCESS_TOKEN}).json()
                     tool_result = insights
                 except Exception as e:
                     tool_result = {"status": "API_ERROR", "details": str(e)}
 
-            # --- FETCH GOOGLE IMAGES ---
             elif tool_name == "fetch_google_images":
                 query = args.get("query")
                 num_images = args.get("num_images", 5)
-                # Render has ephemeral filesystem, stick to /tmp or just create local folder
-                save_folder = './downloaded_images'
+                # Local Windows path or Render tmp
+                save_folder = './downloaded_images' if os.name == 'nt' else '/tmp/downloaded_images'
                 
                 try:
                     image_urls = _fetch_image_urls(query, num_images)
@@ -337,87 +370,73 @@ async def handle_mcp_request(request: Request):
                     else:
                         downloaded_files = []
                         for i, url in enumerate(image_urls):
-                            try:
-                                clean_query = query.replace(' ', '_')
-                                filename = f"{clean_query}_{i}.jpg"
-                                path = _download_image(url, save_folder, filename)
-                                downloaded_files.append({
-                                    "filename": filename,
-                                    "path": path,
-                                    "source_url": url
-                                })
-                            except Exception as e:
-                                print(f"Failed to download image {i}: {e}")
+                            filename = f"{query.replace(' ', '_')}_{i}.jpg"
+                            path = _download_and_verify_image(url, save_folder, filename)
+                            if path:
+                                downloaded_files.append({"filename": filename, "path": path, "source_url": url})
                         
-                        tool_result = {
-                            "status": "success", 
-                            "downloaded_count": len(downloaded_files),
-                            "files": downloaded_files
-                        }
-                except ValueError as ve:
-                    tool_result = {"status": "CONFIG_ERROR", "message": str(ve)}
+                        tool_result = {"status": "success", "downloaded_count": len(downloaded_files), "files": downloaded_files}
                 except Exception as e:
                     tool_result = {"status": "API_ERROR", "details": str(e)}
 
-            # --- CREATE QUOTE IMAGE ---
             elif tool_name == "create_quote_image":
                 search_query = args.get("search_query")
                 quote = args.get("quote")
                 author = args.get("author")
                 
-                download_folder = './downloaded_images'
-                final_folder = './final_posts'
-                if not os.path.exists(final_folder):
-                    os.makedirs(final_folder)
+                save_folder = './downloaded_images' if os.name == 'nt' else '/tmp/downloaded_images'
+                final_folder = './final_posts' if os.name == 'nt' else '/tmp/final_posts'
+                
+                if not os.path.exists(final_folder): os.makedirs(final_folder)
 
                 try:
-                    image_urls = _fetch_image_urls(search_query, 1)
+                    # FIX: Fetch multiple images (3) in case the first one is bad/blocked
+                    image_urls = _fetch_image_urls(search_query, 3)
+                    
+                    bg_path = None
+                    valid_url = None
+                    
                     if not image_urls:
-                        tool_result = {"status": "error", "message": "No background image found."}
+                        tool_result = {"status": "error", "message": "No images found."}
                     else:
-                        bg_path = _download_image(image_urls[0], download_folder, "temp_bg.jpg")
+                        # RETRY LOGIC
+                        for url in image_urls:
+                            print(f"Trying to download background: {url}")
+                            bg_path = _download_and_verify_image(url, save_folder, "temp_bg.jpg")
+                            if bg_path:
+                                valid_url = url
+                                break # Found a working image!
                         
-                        import time
-                        final_filename = f"quote_{int(time.time())}.jpg"
-                        final_path = os.path.join(final_folder, final_filename)
-                        
-                        _apply_text_overlay(bg_path, quote, final_path, author)
-                        
-                        tool_result = {
-                            "status": "success",
-                            "message": "Quote image created successfully.",
-                            "final_image_path": final_path,
-                            "original_image_url": image_urls[0]
-                        }
-                except ValueError as ve:
-                    tool_result = {"status": "CONFIG_ERROR", "message": str(ve)}
+                        if not bg_path:
+                            tool_result = {"status": "error", "message": "Failed to download any valid background images (403 Forbidden/Corrupt)."}
+                        else:
+                            import time
+                            final_filename = f"quote_{int(time.time())}.jpg"
+                            final_path = os.path.join(final_folder, final_filename)
+                            
+                            _apply_text_overlay(bg_path, quote, final_path, author)
+                            
+                            tool_result = {
+                                "status": "success",
+                                "message": "Quote image created successfully.",
+                                "final_image_path": final_path,
+                                "original_image_url": valid_url
+                            }
                 except Exception as e:
                     tool_result = {"status": "ERROR", "details": str(e)}
 
-            # FORMAT RESPONSE
             response_data = {
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "result": {
-                    "content": [{
-                        "type": "text",
-                        "text": json.dumps(tool_result)
-                    }]
-                }
+                "jsonrpc": "2.0", "id": msg_id,
+                "result": {"content": [{"type": "text", "text": json.dumps(tool_result)}]}
             }
 
         return StreamingResponse(iter([sse_pack(response_data)]), media_type="text/event-stream")
 
     except Exception as e:
-        error_response = {
-            "jsonrpc": "2.0",
-            "id": msg_id if 'msg_id' in locals() else None,
-            "error": {"code": -32603, "message": str(e)}
-        }
+        error_response = {"jsonrpc": "2.0", "id": msg_id if 'msg_id' in locals() else None, "error": {"code": -32603, "message": str(e)}}
         return StreamingResponse(iter([sse_pack(error_response)]), media_type="text/event-stream")
 
 if __name__ == "__main__":
-    # Render assigns a PORT environment variable. We must use it.
     port = int(os.environ.get("PORT", 8000))
     print(f"🚀 Starting Render Service on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
