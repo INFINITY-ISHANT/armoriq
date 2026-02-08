@@ -250,6 +250,12 @@ async def handle_mcp_request(request: Request):
                             }
                         },
                         {
+                            "name": "get_follower_count",
+                            "description": "Fetches the total follower count for the Instagram account.",
+                            "inputSchema": {"type": "object", "properties": {}}
+                        },
+
+                        {
                             "name": "get_account_insights",
                             "description": "Fetches metrics.",
                             "inputSchema": {"type": "object", "properties": {}}
@@ -310,6 +316,41 @@ async def handle_mcp_request(request: Request):
                     tool_result = {"status": "success", "messages": messages_data}
                 except Exception as e:
                     tool_result = {"status": "API_ERROR", "details": str(e)}
+            elif tool_name == "get_follower_count":
+                try:
+                    # Basic guard: ensure IG_USER_ID and ACCESS_TOKEN are set
+                    if not IG_USER_ID or not ACCESS_TOKEN:
+                        tool_result = {
+                            "status": "CONFIG_ERROR",
+                            "message": "ACCESS_TOKEN or IG_USER_ID not configured in environment variables."
+                        }
+                    else:
+                        # Query the IG account for follower count
+                        res = requests.get(
+                            f"{GRAPH_URL}/{IG_USER_ID}",
+                            params={"fields": "followers_count", "access_token": ACCESS_TOKEN},
+                            timeout=15
+                        )
+                        # Raise if non-2xx
+                        res.raise_for_status()
+                        data = res.json()
+                        followers = data.get("followers_count")
+                        if followers is None:
+                            tool_result = {
+                                "status": "API_ERROR",
+                                "details": "followers_count not found in Graph API response",
+                                "raw": data
+                            }
+                        else:
+                            tool_result = {"status": "success", "follower_count": int(followers)}
+                except Exception as e:
+                    tool_result = {"status": "API_ERROR", "details": str(e)}
+
+
+
+
+
+
 
             elif tool_name == "reply_to_dm":
                 try:
