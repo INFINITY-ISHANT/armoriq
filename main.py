@@ -1,18 +1,19 @@
 import json
 import os
 import requests
+import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Security, Depends
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.responses import StreamingResponse
 
 # ============================================================================
-# CONFIGURATION (Loaded from Vercel Environment Variables)
+# CONFIGURATION (Loaded from Environment Variables)
 # ============================================================================
 
 MCP_API_KEY = os.environ.get("MCP_API_KEY")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
 IG_USER_ID = os.environ.get("IG_USER_ID")
-GRAPH_URL = "https://graph.facebook.com/v24.0"
+GRAPH_URL = "https://graph.facebook.com/v19.0"
 
 # ============================================================================
 # SECURITY & HELPERS
@@ -210,4 +211,8 @@ async def handle_mcp_request(request: Request):
         }
         return StreamingResponse(iter([sse_pack(error_response)]), media_type="text/event-stream")
 
-# No uvicorn.run needed for Vercel!
+if __name__ == "__main__":
+    # Render assigns a PORT environment variable. We must use it.
+    port = int(os.environ.get("PORT", 8000))
+    print(f"🚀 Starting Render Service on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
